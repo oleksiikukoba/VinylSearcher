@@ -3,6 +3,8 @@ import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 import gspread
+import json
+import os
 
 # --- 1. Налаштування та Глобальні Змінні ---
 # Посилання на вашу Google Таблицю з конфігураціями магазинів
@@ -17,12 +19,6 @@ TOP_ALBUMS_CSV_PATH = 'top_albums.csv'
 def authorize_gspread():
     """Авторизує gspread для доступу до Google Таблиць, використовуючи st.secrets."""
     try:
-        # st.secrets автоматично читає секрети з файлу .streamlit/secrets.toml
-        # або з налаштувань Secrets у Streamlit Community Cloud
-        # Ключі повинні бути вкладені під [gcp_service_account]
-        # Дивіться https://docs.streamlit.io/deploy/streamlit-community-cloud/connect-to-data-sources/gsheets
-        
-        # Використовуємо st.secrets для отримання конфігурації сервісного акаунта
         gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
         st.success("Авторизація Google Таблиць успішна (через st.secrets).")
         return gc
@@ -30,21 +26,19 @@ def authorize_gspread():
         st.error(f"ПОМИЛКА АВТОРИЗАЦІЇ: Відсутній секрет 'gcp_service_account'.")
         st.info("Переконайтесь, що ви правильно налаштували секрети Google Cloud у Streamlit Cloud. "
                 "Всі поля JSON-ключа мають бути вкладені під 'gcp_service_account', як показано в документації Streamlit.")
-        st.stop() # Зупиняємо додаток, якщо ключ не знайдено
+        st.stop()
     except Exception as e:
         st.error(f"ПОМИЛКА АВТОРИЗАЦІЇ Google Таблиць: {e}")
         st.info("Переконайтесь, що ви надали дозволи таблиці (доступ для service account) або коректно налаштували секрети.")
-        st.stop() # Зупиняємо додаток у випадку інших помилок авторизації
+        st.stop()
 
-# Авторизуємо gspread при запуску додатка
-gc = authorize_gspread()
-
+gc = authorize_gspread() # Авторизуємо gspread при запуску додатка
 
 @st.cache_data(ttl=3600, show_spinner="Завантажуємо конфігурацію магазинів...") # Кешуємо дані на 1 годину
 def get_site_configs_from_sheet(sheet_url):
     """
     Отримує конфігурацію магазинів з Google Таблиці,
-    роблячи заголовки колонок більш стійкими до регістру та пробілів.
+    роблячи заголовки колонок більш стійкими та обробляючи можливі помилки даних.
     """
     if not gc:
         st.error("Gspread не авторизовано. Неможливо завантажити конфігурацію.")
@@ -53,34 +47,31 @@ def get_site_configs_from_sheet(sheet_url):
     try:
         spreadsheet = gc.open_by_url(sheet_url)
         worksheet = spreadsheet.sheet1
-        # Отримуємо всі записи, як список словників
-        records = worksheet.get_all_records()
         
-        if not records:
-            st.warning("Google Таблиця конфігурації порожня або не містить даних.")
+        # Отримуємо всі дані як список списків (без автоматичного визначення заголовків)
+        all_data = worksheet.get_all_values()
+        
+        if not all_data:
+            st.warning("Google Таблиця конфігурації порожня.")
             return []
 
-        # Отримуємо заголовки колонок з першого запису і нормалізуємо їх
-        # Це дозволить бути толерантними до регістру і пробілів у заголовках таблиці
-        normalized_headers = {key.strip().lower(): key for key in records[0].keys()}
+        # Визначаємо заголовки з першого рядка
+        headers = [header.strip() for header in all_data[0]]
         
-        # Перевіряємо наявність всіх очікуваних колонок
-        expected_headers_map = {
-            "name": "Name",
-            "baseurl": "BaseURL",
-            "paginationparam": "PaginationParam",
-            "startpage": "StartPage",
-            "endpage": "EndPage",
-            "productcontainer": "ProductContainer",
-            "titleelement": "TitleElement",
-            "priceelement": "PriceElement",
-            "linkelement": "LinkElement",
-            "artistelement": "ArtistElement"
+        # Нормалізуємо заголовки для стійкості (нижній регістр, без пробілів)
+        normalized_headers_map = {
+            "name": "Name", "baseurl": "BaseURL", "paginationparam": "PaginationParam",
+            "startpage": "StartPage", "endpage": "EndPage", "productcontainer": "ProductContainer",
+            "titleelement": "TitleElement", "priceelement": "PriceElement",
+            "linkelement": "LinkElement", "artistelement": "ArtistElement"
         }
+        
+        # Створюємо словник для швидкого доступу до нормалізованих заголовків
+        header_to_col_index = {headers[i].strip().lower(): i for i in range(len(headers))}
 
         missing_headers = []
-        for expected_lower, original_case_name in expected_headers_map.items():
-            if expected_lower not in normalized_headers:
+        for expected_lower, original_case_name in normalized_headers_map.items():
+            if expected_lower not in header_to_col_index:
                 missing_headers.append(original_case_name)
         
         if missing_headers:
@@ -89,30 +80,45 @@ def get_site_configs_from_sheet(sheet_url):
             return []
 
         site_configs = []
-        for record in records:
-            # Створюємо словник з нормалізованими ключами для легшого доступу
-            normalized_record = {key.strip().lower(): value for key, value in record.items()}
+        # Обробляємо кожен рядок даних, починаючи з другого (після заголовків)
+        for row_index, row_data in enumerate(all_data[1:]):
+            if not any(row_data): # Пропускаємо порожні рядки
+                continue
 
-            config = {
-                'name': normalized_record.get('name'),
-                'base_url': normalized_record.get('baseurl'),
-                'pagination_param': normalized_record.get('paginationparam'),
-                'start_page': int(normalized_record.get('startpage', 1)),
-                'end_page': int(normalized_record.get('endpage', 1)),
-                'selectors': {
-                    'product_container': normalized_record.get('productcontainer'),
-                    'title_element': normalized_record.get('titleelement'),
-                    'price_element': normalized_record.get('priceelement'),
-                    'link_element': normalized_record.get('linkelement'),
-                    'ArtistElement': normalized_record.get('artistelement') # Додано ArtistElement
+            # Створюємо словник для поточного запису
+            record = {}
+            for header_name, col_index in header_to_col_index.items():
+                if col_index < len(row_data): # Перевіряємо, чи є дані в цій колонці для поточного рядка
+                    record[header_name] = row_data[col_index]
+                else:
+                    record[header_name] = "" # Якщо даних немає, ставимо порожній рядок
+
+            try:
+                config = {
+                    'name': record.get('name'),
+                    'base_url': record.get('baseurl'),
+                    'pagination_param': record.get('paginationparam'),
+                    'start_page': int(record.get('startpage', 1)),
+                    'end_page': int(record.get('endpage', 1)),
+                    'selectors': {
+                        'product_container': record.get('productcontainer'),
+                        'title_element': record.get('titleelement'),
+                        'price_element': record.get('priceelement'),
+                        'link_element': record.get('linkelement'),
+                        'ArtistElement': record.get('artistelement')
+                    }
                 }
-            }
-            # Перевірка на пусті значення для обов'язкових полів
-            if all(config[key] for key in ['name', 'base_url']) and \
-               all(config['selectors'][key] for key in ['product_container', 'title_element', 'price_element', 'link_element']):
-                site_configs.append(config)
-            else:
-                st.warning(f"Пропущено сайт у конфігурації через незаповнені обов'язкові поля: {record}")
+                # Перевірка на пусті значення для обов'язкових полів
+                if all(config[key] for key in ['name', 'base_url']) and \
+                   all(config['selectors'][key] for key in ['product_container', 'title_element', 'price_element', 'link_element']):
+                    site_configs.append(config)
+                else:
+                    st.warning(f"Пропущено сайт у конфігурації (рядок {row_index+2}) через незаповнені обов'язкові поля: {record.get('name', 'N/A')}. Всі поля: {record}")
+            except ValueError as ve:
+                st.error(f"ПОМИЛКА: Некоректні дані в рядку {row_index+2} таблиці. Очікувалося число, але знайдено інше значення. Деталі: {ve}. Рядок: {record}")
+            except Exception as ex:
+                st.error(f"ПОМИЛКА: Неочікувана проблема з рядком {row_index+2} таблиці. Деталі: {ex}. Рядок: {record}")
+        
         return site_configs
     except gspread.exceptions.SpreadsheetNotFound:
         st.error(f"ПОМИЛКА: Таблицю за посиланням '{sheet_url}' не знайдено.")
@@ -120,7 +126,7 @@ def get_site_configs_from_sheet(sheet_url):
         return []
     except Exception as e:
         st.error(f"ПОМИЛКА при читанні конфігурації з Google Таблиці: {e}")
-        st.info("Схоже, є проблема з даними або форматом таблиці. Переконайтесь, що перший рядок містить коректні заголовки, а дані нижче відповідають цим заголовкам.")
+        st.info("Схоже, є проблема з доступом до таблиці або її структурою. Переконайтесь, що перший рядок містить коректні заголовки.")
         st.error(f"Деталі помилки: {e}")
         return []
 

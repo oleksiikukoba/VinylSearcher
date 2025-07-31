@@ -1,1 +1,6 @@
-
+requests
+beautifulsoup4
+pandas
+gspread
+google-auth
+streamlit

@@ -8,7 +8,7 @@ import os
 
 # --- 1. Налаштування та Глобальні Змінні ---
 # Посилання на вашу Google Таблицю з конфігураціями магазинів
-GOOGLE_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1rQw7-Lj42IODQ_lO_c1bV8G_bNuvUwkyc3bcs4xX0Fg/edit?usp=sharing'
+GOOGLE_SHEET_URL = 'https://docs.google.com/spreadsheets/d/16vCLf0Zo04zW50Wn8PlPFdLnzjYOdP4TZaeT4uP2tUc/edit?usp=sharing'
 
 # Шлях до файлу з ТОП-300 альбомами (він має бути в тому ж репозиторії GitHub)
 TOP_ALBUMS_CSV_PATH = 'top_albums.csv'

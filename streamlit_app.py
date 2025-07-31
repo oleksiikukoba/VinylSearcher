@@ -3,58 +3,47 @@ import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 import gspread
-import json # Для роботи з JSON-ключем сервісного акаунту
-import os # Для змінних оточення
 
 # --- 1. Налаштування та Глобальні Змінні ---
 # Посилання на вашу Google Таблицю з конфігураціями магазинів
 GOOGLE_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1rQw7-Lj42IODQ_lO_c1bV8G_bNuvUwkyc3bcs4xX0Fg/edit?usp=sharing'
 
-# Шлях до файлу з ТОП-300 альбомами на GitHub (в тому ж репозиторії)
+# Шлях до файлу з ТОП-300 альбомами (він має бути в тому ж репозиторії GitHub)
 TOP_ALBUMS_CSV_PATH = 'top_albums.csv'
 
 # --- 2. Функції для Взаємодії з Google Sheets та Авторизація ---
 
 @st.cache_resource # Кешуємо об'єкт gc, щоб він створювався лише один раз
 def authorize_gspread():
-    """Авторизує gspread для доступу до Google Таблиць."""
+    """Авторизує gspread для доступу до Google Таблиць, використовуючи st.secrets."""
     try:
-        # Для Streamlit Community Cloud або інших хостингів:
-        # Ключ сервісного акаунту зберігається як секрет STREAMLIT_GCP_SERVICE_ACCOUNT
-        # у форматі JSON-рядка.
-        gcp_service_account_info = os.getenv('STREAMLIT_GCP_SERVICE_ACCOUNT')
-        if gcp_service_account_info:
-            # Якщо ключ є у змінних оточення, використовуємо його
-            info = json.loads(gcp_service_account_info)
-            gc = gspread.service_account_from_dict(info)
-            st.success("Авторизація Google Таблиць успішна (через секрети).")
-        else:
-            # Для локальної розробки або Colab, якщо ви використовуєте credentials.json
-            # (цей шлях зазвичай не використовується для розгортання)
-            # Якщо ви розгортаєте на Streamlit Community Cloud, ви повинні
-            # налаштувати секрет STREAMLIT_GCP_SERVICE_ACCOUNT!
-            st.warning("STREAMLIT_GCP_SERVICE_ACCOUNT не знайдено. "
-                       "Переконайтесь, що ви налаштували секрети Streamlit Cloud "
-                       "або запускаєте локально з файлом ключа.")
-            st.info("Спробуємо авторизацію gspread.service_account() без параметрів. "
-                    "Це може вимагати файлу 'gcp_credentials.json' поруч з додатком.")
-            # Це працює, якщо файл `gcp_credentials.json` лежить поруч з додатком
-            # (що не рекомендується для публічних репозиторіїв)
-            gc = gspread.service_account() # Спробуємо стандартний спосіб
-
+        # st.secrets автоматично читає секрети з файлу .streamlit/secrets.toml
+        # або з налаштувань Secrets у Streamlit Community Cloud
+        # Ключі повинні бути вкладені під [gcp_service_account]
+        # Дивіться https://docs.streamlit.io/deploy/streamlit-community-cloud/connect-to-data-sources/gsheets
+        
+        # Використовуємо st.secrets для отримання конфігурації сервісного акаунта
+        gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
+        st.success("Авторизація Google Таблиць успішна (через st.secrets).")
         return gc
+    except KeyError as e:
+        st.error(f"ПОМИЛКА АВТОРИЗАЦІЇ: Відсутній секрет 'gcp_service_account'.")
+        st.info("Переконайтесь, що ви правильно налаштували секрети Google Cloud у Streamlit Cloud. "
+                "Всі поля JSON-ключа мають бути вкладені під 'gcp_service_account', як показано в документації Streamlit.")
+        st.stop() # Зупиняємо додаток, якщо ключ не знайдено
     except Exception as e:
         st.error(f"ПОМИЛКА АВТОРИЗАЦІЇ Google Таблиць: {e}")
-        st.info("Переконайтесь, що ви надали дозволи таблиці або коректно налаштували секрети/файл ключа.")
-        return None
+        st.info("Переконайтесь, що ви надали дозволи таблиці (доступ для service account) або коректно налаштували секрети.")
+        st.stop() # Зупиняємо додаток у випадку інших помилок авторизації
 
+# Авторизуємо gspread при запуску додатка
 gc = authorize_gspread()
 
 
-@st.cache_data(ttl=3600) # Кешуємо дані на 1 годину
+@st.cache_data(ttl=3600, show_spinner="Завантажуємо конфігурацію магазинів...") # Кешуємо дані на 1 годину
 def get_site_configs_from_sheet(sheet_url):
     """Отримує конфігурацію магазинів з Google Таблиці."""
-    if not gc:
+    if not gc: # Перевірка, чи авторизація пройшла успішно
         st.error("Gspread не авторизовано. Неможливо завантажити конфігурацію.")
         return []
     
@@ -76,7 +65,7 @@ def get_site_configs_from_sheet(sheet_url):
                     'title_element': record.get('TitleElement'),
                     'price_element': record.get('PriceElement'),
                     'link_element': record.get('LinkElement'),
-                    'ArtistElement': record.get('ArtistElement')
+                    'ArtistElement': record.get('ArtistElement') # Додаємо ArtistElement
                 }
             }
             if all(config[key] for key in ['name', 'base_url']) and \
@@ -109,10 +98,11 @@ def scrape_single_site(site_config):
     end_page = site_config['end_page']
     selectors = site_config['selectors']
 
-    product_container_selectors = [s.strip() for s in selectors['product_container'].split(',') if s.strip()]
-    title_element_selectors = [s.strip() for s in selectors['title_element'].split(',') if s.strip()]
-    price_element_selectors = [s.strip() for s in selectors['price_element'].split(',') if s.strip()]
-    link_element_selectors = [s.strip() for s in selectors['link_element'].split(',') if s.strip()]
+    # Перевіряємо, чи селектори не порожні, перш ніж їх розділяти
+    product_container_selectors = [s.strip() for s in selectors.get('ProductContainer', '').split(',') if s.strip()]
+    title_element_selectors = [s.strip() for s in selectors.get('TitleElement', '').split(',') if s.strip()]
+    price_element_selectors = [s.strip() for s in selectors.get('PriceElement', '').split(',') if s.strip()]
+    link_element_selectors = [s.strip() for s in selectors.get('LinkElement', '').split(',') if s.strip()]
     artist_element_selectors = [s.strip() for s in selectors.get('ArtistElement', '').split(',') if s.strip()]
 
     headers = {
@@ -152,7 +142,7 @@ def scrape_single_site(site_config):
                 break
 
         if not products:
-            st.warning(f"  На сторінці {page_num} не знайдено товарів за жодним із селекторів '{selectors['product_container']}'.")
+            st.warning(f"  На сторінці {page_num} не знайдено товарів за жодним із селекторів '{selectors.get('product_container', 'N/A')}'.")
             if page_num > start_page:
                 st.info(f"  Ймовірно, досягнуто кінця пагінації для {site_name}.")
                 break
@@ -171,16 +161,27 @@ def scrape_single_site(site_config):
                         artist_name = artist_tag.get_text(strip=True).replace('\xa0', ' ').strip()
                         break
 
-            for selector in title_element_selectors:
-                title_tag = product.select_one(selector)
-                if title_tag:
-                    album_name = title_tag.get_text(strip=True).replace('\xa0', ' ').strip()
-                    break
+            if not artist_name: # Якщо артиста не знайшли окремим селектором, спробуємо витягти з назви альбому
+                for selector in title_element_selectors:
+                    title_tag = product.select_one(selector)
+                    if title_tag:
+                        full_title = title_tag.get_text(strip=True).replace('\xa0', ' ').strip()
+                        if ' - ' in full_title:
+                            parts = full_title.split(' - ', 1)
+                            artist_name = parts[0].strip()
+                            album_name = parts[1].strip()
+                        else:
+                            album_name = full_title
+                        break
+            else: # Якщо артиста знайшли, то шукаємо тільки назву альбому
+                for selector in title_element_selectors:
+                    title_tag = product.select_one(selector)
+                    if title_tag:
+                        album_name = title_tag.get_text(strip=True).replace('\xa0', ' ').strip()
+                        if artist_name and album_name.startswith(artist_name + ' - '): # Видаляємо артиста з початку назви альбому, якщо він там дублюється
+                            album_name = album_name[len(artist_name + ' - '):].strip()
+                        break
 
-            if not artist_name and ' - ' in album_name:
-                parts = album_name.split(' - ', 1)
-                artist_name = parts[0].strip()
-                album_name = parts[1].strip()
 
             for selector in price_element_selectors:
                 price_tag = product.select_one(selector)
@@ -277,7 +278,7 @@ if top_albums_df.empty:
 
 # --- Вибір дії та магазинів ---
 st.header("Оберіть дію")
-action_choice = st.radio(
+action_choice_str = st.radio(
     "Яку дію ви хочете виконати?",
     ("Шукати вініли в одному магазині та порівняти з ТОП-300",
      "Шукати конкретні альбоми (з попереднього пошуку) в інших магазинах"),
@@ -288,15 +289,17 @@ action_choice = st.radio(
 shop_names = [config['name'] for config in site_configs]
 shop_name_to_config = {config['name']: config for config in site_configs}
 
-if action_choice == "Шукати вініли в одному магазині та порівняти з ТОП-300":
+# --- Перша дія: Шукати в одному магазині та порівняти з ТОП-300 ---
+if action_choice_str == "Шукати вініли в одному магазині та порівняти з ТОП-300":
     st.subheader("Пошук вінілів в обраному магазині")
     selected_shop_name = st.selectbox(
         "Виберіть магазин для пошуку:",
         shop_names,
-        index=0 # За замовчуванням перший магазин
+        index=0, # За замовчуванням перший магазин
+        key="primary_shop_select"
     )
     
-    if st.button("Почати пошук та отримати рекомендації"):
+    if st.button("Почати пошук та отримати рекомендації", key="start_primary_search"):
         selected_shop_config = shop_name_to_config[selected_shop_name]
         
         with st.spinner(f"Скануємо {selected_shop_name}... Це може зайняти деякий час."):
@@ -306,20 +309,23 @@ if action_choice == "Шукати вініли в одному магазині 
             st.info(f"На жаль, не знайдено вінілів зі знижкою в магазині '{selected_shop_name}'.")
         else:
             recommendations_df = recommend_vinyls(current_shop_deals_df, top_albums_df)
-            st.session_state['last_recommendations'] = recommendations_df # Зберігаємо для наступної дії
+            st.session_state['last_recommendations'] = recommendations_df # Зберігаємо в session_state для наступної дії
 
             if not recommendations_df.empty:
                 st.subheader(f"Знайдено {len(recommendations_df)} рекомендованих вінілів зі знижкою на {selected_shop_name}:")
-                # Форматуємо для Streamlit (посилання клікабельні)
-                recommendations_df['Посилання'] = recommendations_df['Посилання'].apply(lambda x: f"[Link]({x})" if x else "N/A")
-                st.dataframe(recommendations_df)
-                st.info("Ви можете використати ці рекомендації для пошуку в інших магазинах, вибравши іншу дію вище.")
+                # Форматуємо посилання для Streamlit (клікабельні)
+                display_df = recommendations_df.copy()
+                display_df['Посилання'] = display_df['Посилання'].apply(lambda x: f"[Link]({x})" if x else "N/A")
+                st.dataframe(display_df)
+                st.info("Ви можете використати ці рекомендації для пошуку в інших магазинах, обравши дію 'Шукати конкретні альбоми...'")
             else:
                 st.info(f"У магазині '{selected_shop_name}' не знайдено вінілів зі знижкою зі списку ТОП-300, які б збігалися.")
 
-elif action_choice == "Шукати конкретні альбоми (з попереднього пошуку) в інших магазинах":
+# --- Друга дія: Шукати конкретні альбоми в інших магазинах ---
+elif action_choice_str == "Шукати конкретні альбоми (з попереднього пошуку) в інших магазинах":
     st.subheader("Порівняння цін вибраних альбомів")
 
+    # Перевіряємо, чи є попередні рекомендації
     if 'last_recommendations' not in st.session_state or st.session_state['last_recommendations'].empty:
         st.warning("Спочатку виконайте пошук за першою дією, щоб отримати список рекомендованих альбомів.")
         st.stop()
@@ -333,7 +339,7 @@ elif action_choice == "Шукати конкретні альбоми (з поп
 
     # Вибір ID альбомів
     st.info("Введіть ID альбомів, які ви хочете порівняти, через кому (наприклад, 0, 1, 5).")
-    selected_ids_input = st.text_input("Введіть ID альбомів:", key="album_ids_input")
+    selected_ids_input = st.text_input("ID альбомів для порівняння:", key="album_ids_compare_input")
 
     selected_ids = []
     if selected_ids_input:
@@ -347,7 +353,7 @@ elif action_choice == "Шукати конкретні альбоми (з поп
         albums_to_search = last_recommendations_df.loc[last_recommendations_df.index.intersection(selected_ids)]
         if albums_to_search.empty:
             st.warning("Вибрані ID не відповідають жодному альбому з останніх рекомендацій.")
-            st.stop()
+            # st.stop() # Не зупиняємо, щоб можна було виправити ввід
         else:
             st.write("Вибрані альбоми для порівняння:")
             st.dataframe(albums_to_search[['Гурт/Співак', 'Назва Альбому', 'Магазин']])
@@ -360,8 +366,8 @@ elif action_choice == "Шукати конкретні альбоми (з поп
 
     if not available_other_shops:
         st.warning("Немає інших магазинів для порівняння, або всі магазини вже були використані.")
-        st.stop()
-
+        # st.stop() # Не зупиняємо
+    
     other_shop_names = [config['name'] for config in available_other_shops]
     selected_other_shop_names = st.multiselect(
         "Виберіть додаткові магазини для порівняння цін:",
@@ -371,7 +377,7 @@ elif action_choice == "Шукати конкретні альбоми (з поп
 
     shops_for_comparison = [shop_name_to_config[name] for name in selected_other_shop_names]
 
-    if st.button("Порівняти ціни"):
+    if st.button("Порівняти ціни", key="compare_prices_button"):
         if albums_to_search.empty or not shops_for_comparison:
             st.warning("Будь ласка, оберіть альбоми та магазини для порівняння.")
         else:
@@ -396,7 +402,6 @@ elif action_choice == "Шукати конкретні альбоми (з поп
                 for shop_config in shops_for_comparison:
                     st.text(f"  Перевіряємо {shop_config['name']}...")
                     
-                    # Запускаємо скрейпінг сторінок магазину (не пошук по сайту)
                     temp_deals_df = scrape_single_site(shop_config) 
 
                     if not temp_deals_df.empty:
@@ -440,8 +445,6 @@ elif action_choice == "Шукати конкретні альбоми (з поп
 
             if all_comparison_results:
                 final_comparison_df = pd.DataFrame(all_comparison_results).drop_duplicates(subset=['Магазин', 'Гурт/Співак', 'Назва Альбому', 'Посилання'])
-                
-                # Перетворюємо ціну на число для сортування
                 final_comparison_df['Parsed_Price'] = pd.to_numeric(
                     final_comparison_df['Ціна (Знижка)'].astype(str).str.replace('₴', '').str.replace(',', '.').str.replace(' ', ''),
                     errors='coerce'

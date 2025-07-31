@@ -2,135 +2,71 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
-import gspread
-import json
-import os
+# gspread, json, os, base64 більше не потрібні для конфігурації магазинів,
+# якщо вона вбудована в код
+# import gspread
+# import json
+# import os
+# import base64
 
-# --- 1. Налаштування та Глобальні Змінні ---
-# Посилання на вашу Google Таблицю з конфігураціями магазинів
-GOOGLE_SHEET_URL = 'https://docs.google.com/spreadsheets/d/16vCLf0Zo04zW50Wn8PlPFdLnzjYOdP4TZaeT4uP2tUc/edit?usp=sharing'
 
-# Шлях до файлу з ТОП-300 альбомами (він має бути в тому ж репозиторії GitHub)
+# --- 1. Налаштування та Конфігурація Магазинів (ВБУДОВАНО!) ---
+# Шлях до файлу з ТОП-300 альбомами (в тому ж репозиторії GitHub)
 TOP_ALBUMS_CSV_PATH = 'top_albums.csv'
 
-# --- 2. Функції для Взаємодії з Google Sheets та Авторизація ---
-
-@st.cache_resource # Кешуємо об'єкт gc, щоб він створювався лише один раз
-def authorize_gspread():
-    """Авторизує gspread для доступу до Google Таблиць, використовуючи st.secrets."""
-    try:
-        gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
-        st.success("Авторизація Google Таблиць успішна (через st.secrets).")
-        return gc
-    except KeyError as e:
-        st.error(f"ПОМИЛКА АВТОРИЗАЦІЇ: Відсутній секрет 'gcp_service_account'.")
-        st.info("Переконайтесь, що ви правильно налаштували секрети Google Cloud у Streamlit Cloud. "
-                "Всі поля JSON-ключа мають бути вкладені під 'gcp_service_account', як показано в документації Streamlit.")
-        st.stop()
-    except Exception as e:
-        st.error(f"ПОМИЛКА АВТОРИЗАЦІЇ Google Таблиць: {e}")
-        st.info("Переконайтесь, що ви надали дозволи таблиці (доступ для service account) або коректно налаштували секрети.")
-        st.stop()
-
-gc = authorize_gspread() # Авторизуємо gspread при запуску додатка
-
-@st.cache_data(ttl=3600, show_spinner="Завантажуємо конфігурацію магазинів...") # Кешуємо дані на 1 годину
-def get_site_configs_from_sheet(sheet_url):
-    """
-    Отримує конфігурацію магазинів з Google Таблиці,
-    роблячи заголовки колонок більш стійкими та обробляючи можливі помилки даних.
-    """
-    if not gc:
-        st.error("Gspread не авторизовано. Неможливо завантажити конфігурацію.")
-        return []
-    
-    try:
-        spreadsheet = gc.open_by_url(sheet_url)
-        worksheet = spreadsheet.sheet1
-        
-        # Отримуємо всі дані як список списків (без автоматичного визначення заголовків)
-        all_data = worksheet.get_all_values()
-        
-        if not all_data:
-            st.warning("Google Таблиця конфігурації порожня.")
-            return []
-
-        # Визначаємо заголовки з першого рядка
-        headers = [header.strip() for header in all_data[0]]
-        
-        # Нормалізуємо заголовки для стійкості (нижній регістр, без пробілів)
-        normalized_headers_map = {
-            "name": "Name", "baseurl": "BaseURL", "paginationparam": "PaginationParam",
-            "startpage": "StartPage", "endpage": "EndPage", "productcontainer": "ProductContainer",
-            "titleelement": "TitleElement", "priceelement": "PriceElement",
-            "linkelement": "LinkElement", "artistelement": "ArtistElement"
+# КОНФІГУРАЦІЯ ВЕБ-САЙТІВ ДЛЯ СКРЕЙПІНГУ
+# Тепер це список словників прямо в коді.
+# ДОДАВАЙТЕ/РЕДАГУЙТЕ МАГАЗИНИ ТУТ!
+SITE_CONFIGS = [
+    {
+        'name': 'Lampala.com.ua',
+        'base_url': 'https://lampala.com.ua/special-offers/litnia-akciia-20-na-vinil-v-naiavnosti',
+        'pagination_param': 'page',
+        'start_page': 1,
+        'end_page': 80, # Оновіть це число, якщо кількість сторінок змінилась
+        'selectors': {
+            'product_container': 'div.product-block-wrap',
+            'title_element': 'a.product-title',
+            'price_element': 'div.price',
+            'link_element': 'a.product-title',
+            'ArtistElement': '' # Порожнє, бо гурт і альбом разом
         }
-        
-        # Створюємо словник для швидкого доступу до нормалізованих заголовків
-        header_to_col_index = {headers[i].strip().lower(): i for i in range(len(headers))}
+    },
+    {
+        'name': 'vinyla.com',
+        'base_url': 'https://vinyla.com/catalog/vinyl',
+        'pagination_param': 'page',
+        'start_page': 1,
+        'end_page': 25, # Оновіть це число до актуального для vinyla.com/catalog/vinyl
+        'selectors': {
+            'product_container': 'div.figure',
+            'title_element': 'a.figure-title',
+            'price_element': 'span.figure-price',
+            'link_element': 'a.figure-image',
+            'ArtistElement': 'a.figure-caption'
+        }
+    }
+    # ДОДАЙТЕ ІНШІ МАГАЗИНИ ТУТ В АНАЛОГІЧНОМУ ФОРМАТІ
+    # {
+    #     'name': 'Назва_Магазину.ua',
+    #     'base_url': 'https://магазин.ua/сторінка_акцій_чи_каталогу',
+    #     'pagination_param': 'page', # Або 'p', або порожнє, якщо немає пагінації
+    #     'start_page': 1,
+    #     'end_page': 1, # Або актуальна кількість сторінок
+    #     'selectors': {
+    #         'product_container': 'ваш_селектор_контейнера',
+    #         'title_element': 'ваш_селектор_назви',
+    #         'price_element': 'ваш_селектор_ціни',
+    #         'link_element': 'ваш_селектор_посилання',
+    #         'ArtistElement': 'ваш_селектор_артиста' # Або порожнє
+    #     }
+    # },
+]
 
-        missing_headers = []
-        for expected_lower, original_case_name in normalized_headers_map.items():
-            if expected_lower not in header_to_col_index:
-                missing_headers.append(original_case_name)
-        
-        if missing_headers:
-            st.error(f"ПОМИЛКА: У Google Таблиці відсутні наступні необхідні колонки: {', '.join(missing_headers)}.")
-            st.info("Переконайтесь, що заголовки колонок написані точно так, як потрібно (регістр не важливий, але назва має співпадати).")
-            return []
 
-        site_configs = []
-        # Обробляємо кожен рядок даних, починаючи з другого (після заголовків)
-        for row_index, row_data in enumerate(all_data[1:]):
-            if not any(row_data): # Пропускаємо порожні рядки
-                continue
-
-            # Створюємо словник для поточного запису
-            record = {}
-            for header_name, col_index in header_to_col_index.items():
-                if col_index < len(row_data): # Перевіряємо, чи є дані в цій колонці для поточного рядка
-                    record[header_name] = row_data[col_index]
-                else:
-                    record[header_name] = "" # Якщо даних немає, ставимо порожній рядок
-
-            try:
-                config = {
-                    'name': record.get('name'),
-                    'base_url': record.get('baseurl'),
-                    'pagination_param': record.get('paginationparam'),
-                    'start_page': int(record.get('startpage', 1)),
-                    'end_page': int(record.get('endpage', 1)),
-                    'selectors': {
-                        'product_container': record.get('productcontainer'),
-                        'title_element': record.get('titleelement'),
-                        'price_element': record.get('priceelement'),
-                        'link_element': record.get('linkelement'),
-                        'ArtistElement': record.get('artistelement')
-                    }
-                }
-                # Перевірка на пусті значення для обов'язкових полів
-                if all(config[key] for key in ['name', 'base_url']) and \
-                   all(config['selectors'][key] for key in ['product_container', 'title_element', 'price_element', 'link_element']):
-                    site_configs.append(config)
-                else:
-                    st.warning(f"Пропущено сайт у конфігурації (рядок {row_index+2}) через незаповнені обов'язкові поля: {record.get('name', 'N/A')}. Всі поля: {record}")
-            except ValueError as ve:
-                st.error(f"ПОМИЛКА: Некоректні дані в рядку {row_index+2} таблиці. Очікувалося число, але знайдено інше значення. Деталі: {ve}. Рядок: {record}")
-            except Exception as ex:
-                st.error(f"ПОМИЛКА: Неочікувана проблема з рядком {row_index+2} таблиці. Деталі: {ex}. Рядок: {record}")
-        
-        return site_configs
-    except gspread.exceptions.SpreadsheetNotFound:
-        st.error(f"ПОМИЛКА: Таблицю за посиланням '{sheet_url}' не знайдено.")
-        st.info("Переконайтесь, що посилання правильне і таблиця має потрібні дозволи ('Будь-хто, хто має посилання' -> 'Читач').")
-        return []
-    except Exception as e:
-        st.error(f"ПОМИЛКА при читанні конфігурації з Google Таблиці: {e}")
-        st.info("Схоже, є проблема з доступом до таблиці або її структурою. Переконайтесь, що перший рядок містить коректні заголовки.")
-        st.error(f"Деталі помилки: {e}")
-        return []
-
-# --- 3. Функції для Скрейпінгу ---
+# --- 2. Функції для Скрейпінгу ---
+# Функції authorize_gspread та get_site_configs_from_sheet більше не потрібні,
+# так як конфігурація тепер вбудована.
 
 @st.cache_data(ttl=3600, show_spinner="Виконуємо скрейпінг...") # Кешуємо дані та показуємо спінер
 def scrape_single_site(site_config):
@@ -144,11 +80,10 @@ def scrape_single_site(site_config):
     end_page = site_config['end_page']
     selectors = site_config['selectors']
 
-    # Перевіряємо, чи селектори не порожні, перш ніж їх розділяти
-    product_container_selectors = [s.strip() for s in selectors.get('ProductContainer', '').split(',') if s.strip()]
-    title_element_selectors = [s.strip() for s in selectors.get('TitleElement', '').split(',') if s.strip()]
-    price_element_selectors = [s.strip() for s in selectors.get('PriceElement', '').split(',') if s.strip()]
-    link_element_selectors = [s.strip() for s in selectors.get('LinkElement', '').split(',') if s.strip()]
+    product_container_selectors = [s.strip() for s in selectors.get('product_container', '').split(',') if s.strip()]
+    title_element_selectors = [s.strip() for s in selectors.get('title_element', '').split(',') if s.strip()]
+    price_element_selectors = [s.strip() for s in selectors.get('price_element', '').split(',') if s.strip()]
+    link_element_selectors = [s.strip() for s in selectors.get('link_element', '').split(',') if s.strip()]
     artist_element_selectors = [s.strip() for s in selectors.get('ArtistElement', '').split(',') if s.strip()]
 
     headers = {
@@ -166,7 +101,7 @@ def scrape_single_site(site_config):
             url = f"{base_url}?{pagination_param}={page_num}"
         else:
             st.warning(f"Не вказано параметр пагінації для {site_name}. Скрейпінг буде лише для першої сторінки.")
-            if page_num > 1: # Щоб уникнути нескінченного циклу, якщо немає пагінації
+            if page_num > 1:
                 break
                 
         st.text(f"  Завантаження сторінки {page_num}: {url}")
@@ -207,7 +142,7 @@ def scrape_single_site(site_config):
                         artist_name = artist_tag.get_text(strip=True).replace('\xa0', ' ').strip()
                         break
 
-            if not artist_name: # Якщо артиста не знайшли окремим селектором, спробуємо витягти з назви альбому
+            if not artist_name:
                 for selector in title_element_selectors:
                     title_tag = product.select_one(selector)
                     if title_tag:
@@ -219,12 +154,12 @@ def scrape_single_site(site_config):
                         else:
                             album_name = full_title
                         break
-            else: # Якщо артиста знайшли, то шукаємо тільки назву альбому
+            else:
                 for selector in title_element_selectors:
                     title_tag = product.select_one(selector)
                     if title_tag:
                         album_name = title_tag.get_text(strip=True).replace('\xa0', ' ').strip()
-                        if artist_name and album_name.startswith(artist_name + ' - '): # Видаляємо артиста з початку назви альбому, якщо він там дублюється
+                        if artist_name and album_name.startswith(artist_name + ' - '):
                             album_name = album_name[len(artist_name + ' - '):].strip()
                         break
 
@@ -253,7 +188,7 @@ def scrape_single_site(site_config):
     return pd.DataFrame(site_vinyl_records)
 
 
-@st.cache_data(ttl=3600, show_spinner="Порівнюємо з ТОП-300...") # Кешуємо та показуємо спінер
+@st.cache_data(ttl=3600, show_spinner="Порівнюємо з ТОП-300...")
 def recommend_vinyls(discount_df, top_df):
     """
     Порівнює вініли зі знижками з топом альбомів і видає рекомендації.
@@ -285,7 +220,7 @@ def recommend_vinyls(discount_df, top_df):
 
 
 # --- 4. Завантаження ТОП-300 Альбомів ---
-@st.cache_data(ttl=3600) # Кешуємо дані на 1 годину
+@st.cache_data(ttl=3600)
 def load_top_albums(path):
     """Завантажує список ТОП-300 альбомів."""
     try:
@@ -308,11 +243,11 @@ def load_top_albums(path):
 st.set_page_config(page_title="Пошук Вигідних Вінілів", layout="wide")
 st.title("🎶 Бот для Пошуку Вигідних Вінілів 🎶")
 
-# Завантажуємо конфігурацію магазинів (кешується)
-site_configs = get_site_configs_from_sheet(GOOGLE_SHEET_URL)
+# Завантажуємо конфігурацію магазинів (тепер з вбудованого списку)
+site_configs = SITE_CONFIGS
 
 if not site_configs:
-    st.error("Не вдалося завантажити конфігурацію магазинів. Будь ласка, налаштуйте вашу Google Таблицю.")
+    st.error("Конфігурація магазинів порожня. Будь ласка, додайте магазини до списку SITE_CONFIGS у коді.")
     st.stop() # Зупиняємо виконання, якщо немає конфігурації
 
 # Завантажуємо ТОП-300 альбомів (кешується)
@@ -322,7 +257,7 @@ if top_albums_df.empty:
     st.error("Не вдалося завантажити список ТОП-300 альбомів. Перевірте файл 'top_albums.csv'.")
     st.stop() # Зупиняємо виконання
 
-# --- Вибір дії та магазинів ---
+# --- Інтерфейс вибору дії ---
 st.header("Оберіть дію")
 action_choice_str = st.radio(
     "Яку дію ви хочете виконати?",
@@ -359,7 +294,6 @@ if action_choice_str == "Шукати вініли в одному магази�
 
             if not recommendations_df.empty:
                 st.subheader(f"Знайдено {len(recommendations_df)} рекомендованих вінілів зі знижкою на {selected_shop_name}:")
-                # Форматуємо посилання для Streamlit (клікабельні)
                 display_df = recommendations_df.copy()
                 display_df['Посилання'] = display_df['Посилання'].apply(lambda x: f"[Link]({x})" if x else "N/A")
                 st.dataframe(display_df)
@@ -371,7 +305,6 @@ if action_choice_str == "Шукати вініли в одному магази�
 elif action_choice_str == "Шукати конкретні альбоми (з попереднього пошуку) в інших магазинах":
     st.subheader("Порівняння цін вибраних альбомів")
 
-    # Перевіряємо, чи є попередні рекомендації
     if 'last_recommendations' not in st.session_state or st.session_state['last_recommendations'].empty:
         st.warning("Спочатку виконайте пошук за першою дією, щоб отримати список рекомендованих альбомів.")
         st.stop()
@@ -379,11 +312,9 @@ elif action_choice_str == "Шукати конкретні альбоми (з п
     last_recommendations_df = st.session_state['last_recommendations']
 
     st.write("Ось ваші останні рекомендації:")
-    # Додаємо колонку ID для вибору
     display_df_with_id = last_recommendations_df[['Гурт/Співак', 'Назва Альбому', 'Магазин']].reset_index().rename(columns={'index': 'ID'})
     st.dataframe(display_df_with_id)
 
-    # Вибір ID альбомів
     st.info("Введіть ID альбомів, які ви хочете порівняти, через кому (наприклад, 0, 1, 5).")
     selected_ids_input = st.text_input("ID альбомів для порівняння:", key="album_ids_compare_input")
 
@@ -399,20 +330,17 @@ elif action_choice_str == "Шукати конкретні альбоми (з п
         albums_to_search = last_recommendations_df.loc[last_recommendations_df.index.intersection(selected_ids)]
         if albums_to_search.empty:
             st.warning("Вибрані ID не відповідають жодному альбому з останніх рекомендацій.")
-            # st.stop() # Не зупиняємо, щоб можна було виправити ввід
         else:
             st.write("Вибрані альбоми для порівняння:")
             st.dataframe(albums_to_search[['Гурт/Співак', 'Назва Альбому', 'Магазин']])
 
-    # Вибір магазинів для порівняння
     available_other_shops = [
         config for config in site_configs 
-        if config['name'] not in albums_to_search['Магазин'].unique() # Виключаємо магазин, звідки альбом вже є
+        if config['name'] not in albums_to_search['Магазин'].unique()
     ]
 
     if not available_other_shops:
         st.warning("Немає інших магазинів для порівняння, або всі магазини вже були використані.")
-        # st.stop() # Не зупиняємо
     
     other_shop_names = [config['name'] for config in available_other_shops]
     selected_other_shop_names = st.multiselect(
@@ -430,7 +358,6 @@ elif action_choice_str == "Шукати конкретні альбоми (з п
             st.subheader("Розширений пошук та порівняння цін")
             all_comparison_results = []
 
-            # Додаємо оригінальні пропозиції
             for idx, row in albums_to_search.iterrows():
                  all_comparison_results.append({
                     'Магазин': row['Магазин'],
@@ -501,8 +428,7 @@ elif action_choice_str == "Шукати конкретні альбоми (з п
                     st.subheader("Результати порівняння цін:")
                     for (artist, album), group in final_comparison_df.groupby(['Гурт/Співак', 'Назва Альбому']):
                         st.write(f"**{artist}** - *{album}*")
-                        # Форматуємо посилання для Streamlit
-                        group_display = group.copy() # Створюємо копію для уникнення SettingWithCopyWarning
+                        group_display = group.copy()
                         group_display['Посилання'] = group_display['Посилання'].apply(lambda x: f"[Link]({x})" if x else "N/A")
                         st.dataframe(group_display[['Магазин', 'Гурт/Співак', 'Назва Альбому', 'Ціна (Знижка)', 'Посилання']].sort_values(by='Parsed_Price'))
                 else:

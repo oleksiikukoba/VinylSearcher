@@ -42,32 +42,72 @@ gc = authorize_gspread()
 
 @st.cache_data(ttl=3600, show_spinner="Завантажуємо конфігурацію магазинів...") # Кешуємо дані на 1 годину
 def get_site_configs_from_sheet(sheet_url):
-    """Отримує конфігурацію магазинів з Google Таблиці."""
-    if not gc: # Перевірка, чи авторизація пройшла успішно
+    """
+    Отримує конфігурацію магазинів з Google Таблиці,
+    роблячи заголовки колонок більш стійкими до регістру та пробілів.
+    """
+    if not gc:
         st.error("Gspread не авторизовано. Неможливо завантажити конфігурацію.")
         return []
     
     try:
         spreadsheet = gc.open_by_url(sheet_url)
         worksheet = spreadsheet.sheet1
+        # Отримуємо всі записи, як список словників
         records = worksheet.get_all_records()
+        
+        if not records:
+            st.warning("Google Таблиця конфігурації порожня або не містить даних.")
+            return []
+
+        # Отримуємо заголовки колонок з першого запису і нормалізуємо їх
+        # Це дозволить бути толерантними до регістру і пробілів у заголовках таблиці
+        normalized_headers = {key.strip().lower(): key for key in records[0].keys()}
+        
+        # Перевіряємо наявність всіх очікуваних колонок
+        expected_headers_map = {
+            "name": "Name",
+            "baseurl": "BaseURL",
+            "paginationparam": "PaginationParam",
+            "startpage": "StartPage",
+            "endpage": "EndPage",
+            "productcontainer": "ProductContainer",
+            "titleelement": "TitleElement",
+            "priceelement": "PriceElement",
+            "linkelement": "LinkElement",
+            "artistelement": "ArtistElement"
+        }
+
+        missing_headers = []
+        for expected_lower, original_case_name in expected_headers_map.items():
+            if expected_lower not in normalized_headers:
+                missing_headers.append(original_case_name)
+        
+        if missing_headers:
+            st.error(f"ПОМИЛКА: У Google Таблиці відсутні наступні необхідні колонки: {', '.join(missing_headers)}.")
+            st.info("Переконайтесь, що заголовки колонок написані точно так, як потрібно (регістр не важливий, але назва має співпадати).")
+            return []
 
         site_configs = []
         for record in records:
+            # Створюємо словник з нормалізованими ключами для легшого доступу
+            normalized_record = {key.strip().lower(): value for key, value in record.items()}
+
             config = {
-                'name': record.get('Name'),
-                'base_url': record.get('BaseURL'),
-                'pagination_param': record.get('PaginationParam'),
-                'start_page': int(record.get('StartPage', 1)),
-                'end_page': int(record.get('EndPage', 1)),
+                'name': normalized_record.get('name'),
+                'base_url': normalized_record.get('baseurl'),
+                'pagination_param': normalized_record.get('paginationparam'),
+                'start_page': int(normalized_record.get('startpage', 1)),
+                'end_page': int(normalized_record.get('endpage', 1)),
                 'selectors': {
-                    'product_container': record.get('ProductContainer'),
-                    'title_element': record.get('TitleElement'),
-                    'price_element': record.get('PriceElement'),
-                    'link_element': record.get('LinkElement'),
-                    'ArtistElement': record.get('ArtistElement') # Додаємо ArtistElement
+                    'product_container': normalized_record.get('productcontainer'),
+                    'title_element': normalized_record.get('titleelement'),
+                    'price_element': normalized_record.get('priceelement'),
+                    'link_element': normalized_record.get('linkelement'),
+                    'ArtistElement': normalized_record.get('artistelement') # Додано ArtistElement
                 }
             }
+            # Перевірка на пусті значення для обов'язкових полів
             if all(config[key] for key in ['name', 'base_url']) and \
                all(config['selectors'][key] for key in ['product_container', 'title_element', 'price_element', 'link_element']):
                 site_configs.append(config)
@@ -80,9 +120,9 @@ def get_site_configs_from_sheet(sheet_url):
         return []
     except Exception as e:
         st.error(f"ПОМИЛКА при читанні конфігурації з Google Таблиці: {e}")
-        st.info("Переконайтесь, що заголовки колонок у таблиці написані точно так: Name, BaseURL, PaginationParam, StartPage, EndPage, ProductContainer, TitleElement, PriceElement, LinkElement, ArtistElement")
+        st.info("Схоже, є проблема з даними або форматом таблиці. Переконайтесь, що перший рядок містить коректні заголовки, а дані нижче відповідають цим заголовкам.")
+        st.error(f"Деталі помилки: {e}")
         return []
-
 
 # --- 3. Функції для Скрейпінгу ---
 
